@@ -4,22 +4,18 @@ import Link from "next/link";
 import { initialsFromName } from "@/lib/text";
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
-import { ArrowLeft, ChevronRight, Home } from "lucide-react";
-import { InductionTrainingEmbed } from "@/app/induction/components/InductionTrainingEmbed";
+import { ArrowLeft, Check, ChevronRight, Home, User } from "lucide-react";
 import { BranchOnboardingSection } from "@/app/induction/components/BranchOnboardingSection";
 import { CompletionBanner } from "@/app/induction/components/CompletionBanner";
 import { AssignRoleModal, type ActiveUserOption } from "@/app/induction/components/AssignRoleModal";
 import {
-  DAY1_TASKS,
-  DAY2_TASKS,
-  DAY3_TASKS,
   typeForWorkflowTemplate,
-  type SpecTask,
   type EmployeeTypeKey,
 } from "@/lib/induction-task-spec";
 import type {
   PendingInductionRow,
   DepartmentOption,
+  InductionStepView,
 } from "@/app/induction/queries";
 import type { BranchOpt } from "@/lib/employeeQueries";
 import type { AssignmentForCandidate } from "@/lib/workflow/queries";
@@ -33,9 +29,10 @@ interface AssignableWorkflowOption {
 
 interface Props {
   profile: PendingInductionRow;
-  /** Map of DB step titles → completed=true. Lets us reconcile spec task
-   *  list with actual saved state when DB titles match. */
-  completedStepTitles: Set<string>;
+  /** The candidate's real induction steps (single source of truth). The day
+   *  tabs bucket these by phase and read completion straight from DB status —
+   *  no spec-title reconciliation. */
+  steps: InductionStepView[];
   /** For Assign Role modal dropdowns. */
   branches: BranchOpt[];
   departments: DepartmentOption[];
@@ -58,6 +55,22 @@ function formatLongDate(iso: string | null): string {
   });
 }
 
+/** Whole days between a step's due date and the induction start date. */
+function dayDiff(dueIso: string, startIso: string): number {
+  const due = new Date(dueIso).getTime();
+  const start = new Date(startIso).getTime();
+  if (!Number.isFinite(due) || !Number.isFinite(start)) return 0;
+  return Math.round((due - start) / 86_400_000);
+}
+
+/** Map a step's day-offset to one of the 3 day tabs. Pre-onboarding and
+ *  Day-0 tasks both live under Day 1, mirroring the swimlane bucketing. */
+function tabFor(daysFromStart: number): 1 | 2 | 3 {
+  if (daysFromStart <= 0) return 1;
+  if (daysFromStart === 1) return 2;
+  return 3;
+}
+
 const TYPE_COLOR: Record<EmployeeTypeKey, { bg: string; text: string; ring: string }> = {
   "regular-intern": { bg: "bg-blue-100", text: "text-blue-700", ring: "ring-blue-200" },
   "protege-intern": { bg: "bg-violet-100", text: "text-violet-700", ring: "ring-violet-200" },
@@ -68,7 +81,7 @@ const TYPE_COLOR: Record<EmployeeTypeKey, { bg: string; text: string; ring: stri
 
 export function CandidateDetailView({
   profile,
-  completedStepTitles,
+  steps,
   branches,
   departments,
   activeUsers,
@@ -82,58 +95,45 @@ export function CandidateDetailView({
 
   const type = typeForWorkflowTemplate(profile.workflowTemplate);
   const color = TYPE_COLOR[type.key];
-
-  // Per spec: status mapping for read-only checklist display
-  // - Completed: every box ticked
-  // - In Progress: reflect DB saved state
-  // - Sent: all empty
   const isCompletedStatus = profile.status === "Completed";
-  const isSentStatus = profile.status === "Sent" || profile.status === "Created";
 
-  function isTaskTicked(task: SpecTask): boolean {
-    if (isCompletedStatus) return true;
-    if (isSentStatus) return false;
-    // In Progress: check if DB has a completed step with matching title
-    return completedStepTitles.has(task.title);
+  // Single source of truth: bucket the real induction steps into the 3 day
+  // tabs (pre-onboarding + Day-0 tasks fold into Day 1) and read completion
+  // straight from DB status — no spec-title reconciliation.
+  const day1Steps = steps.filter((s) => tabFor(dayDiff(s.dueDate, profile.startDate)) === 1);
+  const day2Steps = steps.filter((s) => tabFor(dayDiff(s.dueDate, profile.startDate)) === 2);
+  const day3Steps = steps.filter((s) => tabFor(dayDiff(s.dueDate, profile.startDate)) === 3);
+
+  function dayCompletion(daySteps: InductionStepView[]): { done: number; total: number } {
+    return {
+      done: daySteps.filter((s) => s.status === "Completed").length,
+      total: daySteps.length,
+    };
   }
+  const day1Stats = dayCompletion(day1Steps);
+  const day2Stats = dayCompletion(day2Steps);
+  const day3Stats = dayCompletion(day3Steps);
 
-  const day1Tasks = DAY1_TASKS;
-  const day2Tasks = DAY2_TASKS[type.key];
-  const day3Tasks = DAY3_TASKS[type.key];
-
-  function dayCompletion(tasks: SpecTask[]): { done: number; total: number } {
-    const done = tasks.filter((t) => isTaskTicked(t)).length;
-    return { done, total: tasks.length };
-  }
-
-  const day1Stats = dayCompletion(day1Tasks);
-  const day2Stats = dayCompletion(day2Tasks);
-  const day3Stats = dayCompletion(day3Tasks);
-
-  // Day-level completion = all CANDIDATE-actor tasks done (per spec definition)
-  function dayCandidateActorComplete(tasks: SpecTask[]): boolean {
-    return tasks
-      .filter((t) => t.actor === "Candidate")
-      .every((t) => isTaskTicked(t));
-  }
-  const day1CandComplete = dayCandidateActorComplete(day1Tasks);
-  const day2CandComplete = dayCandidateActorComplete(day2Tasks);
-  const day3CandComplete = dayCandidateActorComplete(day3Tasks);
+  // A day is "complete" when it has steps and every one is Completed.
+  const dayComplete = (daySteps: InductionStepView[]) =>
+    daySteps.length > 0 && daySteps.every((s) => s.status === "Completed");
+  const day1Done = dayComplete(day1Steps);
+  const day2Done = dayComplete(day2Steps);
+  const day3Done = dayComplete(day3Steps);
 
   // 3-step stepper state
   const stepperDays = [
-    { day: 1, label: "Day 1 / HQ", complete: day1CandComplete, active: !day1CandComplete },
-    { day: 2, label: "Day 2 / By Type", complete: day2CandComplete, active: day1CandComplete && !day2CandComplete },
-    { day: 3, label: "Day 3 / Completion", complete: day3CandComplete, active: day2CandComplete && !day3CandComplete },
+    { day: 1, label: "Day 1 / HQ", complete: day1Done, active: !day1Done },
+    { day: 2, label: "Day 2 / By Type", complete: day2Done, active: day1Done && !day2Done },
+    { day: 3, label: "Day 3 / Completion", complete: day3Done, active: day2Done && !day3Done },
   ];
-  const overallPct = isCompletedStatus
-    ? 100
-    : profile.totalSteps > 0
-      ? Math.round((profile.completedSteps / profile.totalSteps) * 100)
-      : 0;
 
-  const activeTasks =
-    activeDay === 1 ? day1Tasks : activeDay === 2 ? day2Tasks : day3Tasks;
+  const totalSteps = steps.length;
+  const doneSteps = steps.filter((s) => s.status === "Completed").length;
+  const overallPct = totalSteps > 0 ? Math.round((doneSteps / totalSteps) * 100) : 0;
+
+  const activeSteps =
+    activeDay === 1 ? day1Steps : activeDay === 2 ? day2Steps : day3Steps;
 
   return (
     <div className="min-h-full bg-slate-50">
@@ -201,15 +201,8 @@ export function CandidateDetailView({
                 </div>
               </div>
             </div>
-            {/* View as Candidate → button (Phase C will wire to candidate portal) */}
-            <button
-              type="button"
-              disabled
-              title="Candidate Portal — coming in Phase C"
-              className="inline-flex items-center gap-1.5 rounded-md border-2 border-violet-300 bg-white px-3 py-1.5 text-xs font-semibold text-violet-400 cursor-not-allowed"
-            >
-              🎓 View as Candidate →
-            </button>
+            {/* "View as Candidate" lives here once the candidate portal ships
+                (Phase C). Hidden until then rather than shown disabled. */}
           </div>
         </section>
 
@@ -254,11 +247,6 @@ export function CandidateDetailView({
           </div>
         </section>
 
-        {/* ── INDUCTION TRAINING EMBED ── */}
-        <div className="mb-5">
-          <InductionTrainingEmbed employeeTypeLabel={type.label} />
-        </div>
-
         {/* ── DAY TABS CHECKLIST ── */}
         <section aria-labelledby="day-tabs-heading" className="bg-white border border-slate-200 rounded-2xl mb-5 overflow-hidden">
           <header className="px-5 py-4 border-b border-slate-200">
@@ -271,21 +259,25 @@ export function CandidateDetailView({
             <DayTab day={3} active={activeDay === 3} stats={day3Stats} onClick={() => setActiveDay(3)} label="Day 3 — Completion" />
           </div>
           <ul className="divide-y divide-slate-200">
-            {activeTasks.map((task, i) => (
-              <ReadOnlyTaskItem key={i} task={task} ticked={isTaskTicked(task)} />
-            ))}
+            {activeSteps.length === 0 ? (
+              <li className="px-5 py-8 text-center text-sm text-slate-500 italic">
+                No tasks in this phase.
+              </li>
+            ) : (
+              activeSteps.map((step) => <ReadOnlyTaskItem key={step.id} step={step} />)
+            )}
           </ul>
         </section>
 
         {/* ── 3-WEEK BRANCH ONBOARDING (conditional) ── */}
         {type.hasBranchOnboarding && (
           <div className="mb-5">
-            <BranchOnboardingSection day3Complete={day3CandComplete} />
+            <BranchOnboardingSection day3Complete={day3Done} />
           </div>
         )}
 
         {/* ── DEPARTMENT WORKFLOW (conditional) ── */}
-        {type.hasDepartmentWorkflow && day3CandComplete && (
+        {type.hasDepartmentWorkflow && day3Done && (
           <div className="mb-5">
             <DepartmentWorkflowSection
               userId={profile.userId}
@@ -348,14 +340,15 @@ function DayTab({
   );
 }
 
-function ReadOnlyTaskItem({ task, ticked }: { task: SpecTask; ticked: boolean }) {
-  const isCandidate = task.actor === "Candidate";
-  const actorClass =
-    task.actor === "HR"
-      ? "bg-slate-900 text-white"
-      : task.actor === "Full-time Coach"
-        ? "bg-slate-700 text-white"
-        : "bg-slate-600 text-white";
+function ReadOnlyTaskItem({ step }: { step: InductionStepView }) {
+  const ticked = step.status === "Completed";
+  const inProgress = step.status === "In Progress";
+  const statusPill = ticked
+    ? "bg-emerald-50 text-emerald-700 ring-emerald-200"
+    : inProgress
+      ? "bg-blue-50 text-blue-700 ring-blue-200"
+      : "bg-slate-50 text-slate-600 ring-slate-200";
+  const statusLabel = ticked ? "Completed" : inProgress ? "In progress" : "Pending";
 
   return (
     <li className="px-5 py-3 flex items-start gap-3">
@@ -367,21 +360,21 @@ function ReadOnlyTaskItem({ task, ticked }: { task: SpecTask; ticked: boolean })
         }`}
         aria-hidden="true"
       >
-        {ticked && (
-          <span className="text-[11px] font-bold leading-none">✓</span>
-        )}
+        {ticked && <Check className="w-3 h-3" strokeWidth={3} />}
       </div>
       <div className="min-w-0 flex-1">
         <p className={`text-sm ${ticked ? "text-slate-500 line-through" : "text-slate-700"}`}>
-          {task.title}
+          {step.title}
         </p>
-        <div className="mt-1 flex items-center gap-2">
-          <span className={`inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-semibold ${actorClass}`}>
-            {task.actor}
+        <div className="mt-1 flex flex-wrap items-center gap-2">
+          <span
+            className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold ring-1 ${statusPill}`}
+          >
+            {statusLabel}
           </span>
-          {!isCandidate && !ticked && (
-            <span className="text-[11px] text-amber-700 font-semibold">
-              ⏳ Awaiting {task.actor}
+          {step.responsibleName && (
+            <span className="inline-flex items-center gap-1 text-[11px] text-slate-500">
+              <User className="w-3 h-3" aria-hidden="true" /> {step.responsibleName}
             </span>
           )}
         </div>

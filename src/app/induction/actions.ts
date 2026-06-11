@@ -700,9 +700,8 @@ export interface AssignCandidateRoleParams {
   role: string;
   departmentId: number;
   branchId: number | null;
-  /** Manager the new hire reports to. NOT PERSISTED in this PR — schema has
-   *  no reports_to column on employment yet. Accepted for forward-compat
-   *  with future schema add. Logged for audit but otherwise ignored. */
+  /** Manager / HOD the new hire reports to. Persisted to
+   *  employment.reports_to_user_id (nullable). */
   reportsToUserId: number | null;
 }
 
@@ -725,8 +724,6 @@ export interface AssignCandidateRoleResult {
  *     pipeline queries
  *
  * What this does NOT do (deferred):
- *  - reportsToUserId is captured in the form but NOT persisted (no
- *    `reports_to` column on employment yet — add via future schema PR)
  *  - No audit log event yet (audit log subsystem is its own future PR)
  *  - No email notification to the candidate
  */
@@ -738,19 +735,13 @@ export async function assignCandidateRole(
   const auth = await loadActorAndAuthorize();
   if (!auth.ok) return { ok: false, error: auth.error };
 
-  // Narrow further: only admin/superadmin can assign roles. canManageInductions
-  // (which loadActorAndAuthorize uses) includes "hr" and "od" too, but the
-  // spec says Assign Role is admin-only on this page.
-  const session = await getServerSession(authOptions);
-  if (!session?.user?.email) return { ok: false, error: "Not signed in." };
-  const actorUser = await prisma.users.findUnique({
-    where: { email: session.user.email },
-    select: { role: { select: { role_type: true } } },
-  });
-  const roleType = (actorUser?.role?.role_type ?? "").toLowerCase();
-  if (roleType !== "admin" && roleType !== "superadmin") {
-    return { ok: false, error: "Only admin / superadmin can assign roles." };
-  }
+  // Authorization: any induction manager (superadmin / hr / od) may assign a
+  // permanent role. This intentionally matches canManageInductions exactly.
+  // Previously this narrowed to admin/superadmin only, which (a) dead-ended
+  // HR/OD users — they could reach the dashboard and see the "Assign Role"
+  // CTA but the action rejected them on submit — and (b) named "admin", a
+  // role that canManageInductions excludes, so admins could never reach the
+  // page to use it. loadActorAndAuthorize() above is now the single gate.
 
   if (!Number.isFinite(profileId) || profileId <= 0) {
     return { ok: false, error: "Invalid profile id." };
@@ -801,6 +792,7 @@ export async function assignCandidateRole(
             position: role,
             department_id: departmentId,
             branch_id: branchId,
+            reports_to_user_id: reportsToUserId,
             status: "active",
           },
         });
@@ -811,6 +803,7 @@ export async function assignCandidateRole(
             position: role,
             department_id: departmentId,
             branch_id: branchId,
+            reports_to_user_id: reportsToUserId,
             status: "active",
             start_date: new Date(),
           },
@@ -832,7 +825,7 @@ export async function assignCandidateRole(
         departmentId,
         branchId,
         reportsToUserId,
-        assignedBy: actorUser?.role?.role_type,
+        assignedBy: auth.actor.role_type,
       }),
     );
 
@@ -845,6 +838,107 @@ export async function assignCandidateRole(
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Unknown database error.";
     return { ok: false, error: `Could not assign role: ${msg}` };
+  }
+}
+
+export interface ReportsToOption {
+  userId: number;
+  fullName: string;
+  position: string | null;
+}
+
+/**
+ * Department heads a candidate can report to, scoped to the department (and
+ * branch, when given) selected in the Assign Role modal. Returns users with a
+ * HOD role whose active employment is in that department/branch. Empty array
+ * when none match or the viewer isn't an induction manager.
+ */
+export async function listDepartmentHeads(
+  departmentId: number,
+  branchId: number | null,
+): Promise<ReportsToOption[]> {
+  const auth = await loadActorAndAuthorize();
+  if (!auth.ok) return [];
+  if (!Number.isFinite(departmentId) || departmentId <= 0) return [];
+
+  const employmentWhere: {
+    status: string;
+    department_id: number;
+    branch_id?: number;
+  } = { status: "active", department_id: departmentId };
+  if (branchId != null && Number.isFinite(branchId)) {
+    employmentWhere.branch_id = branchId;
+  }
+
+  const rows = await prisma.users.findMany({
+    where: {
+      status: "active",
+      role: { role_type: { equals: "hod", mode: "insensitive" } },
+      employment: { some: employmentWhere },
+    },
+    include: {
+      user_profile: { select: { full_name: true } },
+      employment: {
+        where: employmentWhere,
+        orderBy: { start_date: "desc" },
+        take: 1,
+        select: { position: true },
+      },
+    },
+    orderBy: { email: "asc" },
+  });
+  type Row = (typeof rows)[number];
+  return rows.map((u: Row) => ({
+    userId: u.user_id,
+    fullName: u.user_profile?.full_name ?? u.email,
+    position: u.employment[0]?.position ?? null,
+  }));
+}
+
+/**
+ * Onboarding → Active transition, fired the moment an onboarding induction's
+ * checklist reaches 100%. Extends the existing completion handlers (it is
+ * called from inside their `remaining === 0` branch, in the same transaction):
+ *
+ *   1. Flips the employee's status from "onboarding" to "active" on both the
+ *      users and employment records.
+ *   2. Writes one notification per superadmin so they can grant system access
+ *      (the notification table is write-only here; no UI consumes it yet).
+ *
+ * Only call this for Onboarding-type profiles — offboarding inductions reuse
+ * the same completion handler and must NOT be activated or announced.
+ */
+async function finalizeOnboardingActivation(tx: TxClient, userId: number): Promise<void> {
+  await tx.employment.updateMany({
+    where: { user_id: userId },
+    data: { status: "active" },
+  });
+  await tx.users.update({
+    where: { user_id: userId },
+    data: { status: "active" },
+  });
+
+  const profile = await tx.user_profile.findUnique({
+    where: { user_id: userId },
+    select: { full_name: true },
+  });
+  const employeeName = profile?.full_name ?? "An employee";
+
+  const superadmins = await tx.users.findMany({
+    where: { role: { role_type: "superadmin" }, deleted_at: null },
+    select: { user_id: true },
+  });
+  if (superadmins.length > 0) {
+    await tx.notification.createMany({
+      data: superadmins.map((admin) => ({
+        recipient_user_id: admin.user_id,
+        type: "onboarding_completed",
+        message: `${employeeName} completed onboarding — assign system access`,
+        // Account Management → this employee's record. No Superadmin UI
+        // consumes this link yet (next sprint); the param is forward-compatible.
+        link: `/account-management?employee=${userId}`,
+      })),
+    });
   }
 }
 
@@ -870,7 +964,7 @@ export async function markStepCompleteByToken(
 
   const profile = await prisma.induction_profile.findUnique({
     where: { link_token: token },
-    select: { id: true, user_id: true, link_expires_at: true, status: true, start_date: true },
+    select: { id: true, user_id: true, link_expires_at: true, status: true, start_date: true, induction_type: true },
   });
   if (!profile) return { ok: false, error: "Invalid or revoked link." };
   if (profile.link_expires_at.getTime() < Date.now()) {
@@ -961,6 +1055,13 @@ export async function markStepCompleteByToken(
           },
           data: { status: "completed" },
         });
+
+        // Onboarding complete → flip the employee to "active" and notify
+        // superadmins. Offboarding inductions reuse this handler, so gate
+        // strictly on the Onboarding type.
+        if (profile.induction_type === "Onboarding") {
+          await finalizeOnboardingActivation(tx, profile.user_id);
+        }
       }
     });
   } catch (e) {
@@ -1016,6 +1117,7 @@ export async function submitStepEvidenceByToken(
       link_expires_at: true,
       status: true,
       start_date: true,
+      induction_type: true,
     },
   });
   if (!profile) return { ok: false, error: "Invalid or revoked link." };
@@ -1121,6 +1223,13 @@ export async function submitStepEvidenceByToken(
           },
           data: { status: "completed" },
         });
+
+        // Onboarding complete → flip the employee to "active" and notify
+        // superadmins. Offboarding inductions reuse this handler, so gate
+        // strictly on the Onboarding type.
+        if (profile.induction_type === "Onboarding") {
+          await finalizeOnboardingActivation(tx, profile.user_id);
+        }
       }
     });
   } catch (e) {

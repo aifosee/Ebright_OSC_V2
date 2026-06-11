@@ -1,7 +1,12 @@
 "use client";
 
-import { useState, useTransition } from "react";
-import { assignCandidateRole } from "@/app/induction/actions";
+import { useEffect, useState, useTransition } from "react";
+import { useModalA11y } from "@/app/components/useModalA11y";
+import {
+  assignCandidateRole,
+  listDepartmentHeads,
+  type ReportsToOption,
+} from "@/app/induction/actions";
 import type { PendingInductionRow, DepartmentOption } from "@/app/induction/queries";
 import type { BranchOpt } from "@/lib/employeeQueries";
 
@@ -34,7 +39,6 @@ export function AssignRoleModal({
   profile,
   branches,
   departments,
-  activeUsers,
   onClose,
   onSuccess,
 }: Props) {
@@ -42,8 +46,36 @@ export function AssignRoleModal({
   const [departmentId, setDepartmentId] = useState<string>("");
   const [branchId, setBranchId] = useState<string>("");
   const [reportsToUserId, setReportsToUserId] = useState<string>("");
+  // "Reporting To" is populated dynamically with the HOD(s) of the selected
+  // department (narrowed by branch when one is chosen) — see effect below.
+  const [reportsToOptions, setReportsToOptions] = useState<ReportsToOption[]>([]);
+  const [loadingReportsTo, setLoadingReportsTo] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitting, startTransition] = useTransition();
+  const dialogRef = useModalA11y<HTMLDivElement>(onClose);
+
+  // Re-fetch department heads whenever the department or branch changes.
+  // The dropdown stays disabled until a department is picked.
+  useEffect(() => {
+    if (!departmentId) {
+      setReportsToOptions([]);
+      setReportsToUserId("");
+      return;
+    }
+    let cancelled = false;
+    setLoadingReportsTo(true);
+    setReportsToUserId("");
+    listDepartmentHeads(Number(departmentId), branchId ? Number(branchId) : null)
+      .then((opts) => {
+        if (!cancelled) setReportsToOptions(opts);
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingReportsTo(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [departmentId, branchId]);
 
   const canSubmit = role !== "" && departmentId !== "";
 
@@ -77,7 +109,9 @@ export function AssignRoleModal({
       onClick={onClose}
     >
       <div
-        className="bg-white rounded-xl shadow-2xl w-full max-w-lg overflow-hidden"
+        ref={dialogRef}
+        tabIndex={-1}
+        className="bg-white rounded-xl shadow-2xl w-full max-w-lg overflow-hidden focus:outline-none"
         onClick={(e) => e.stopPropagation()}
       >
         <header className="px-6 py-4 border-b" style={{ borderColor: "#E5E5E0" }}>
@@ -137,15 +171,27 @@ export function AssignRoleModal({
             <select
               value={reportsToUserId}
               onChange={(e) => setReportsToUserId(e.target.value)}
-              className="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+              disabled={!departmentId || loadingReportsTo}
+              className="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:bg-slate-50 disabled:text-slate-400 disabled:cursor-not-allowed"
             >
-              <option value="">— No direct manager —</option>
-              {activeUsers.map((u) => (
+              <option value="">
+                {!departmentId
+                  ? "Select branch & department first"
+                  : loadingReportsTo
+                    ? "Loading department heads…"
+                    : reportsToOptions.length === 0
+                      ? "No department head found"
+                      : "— No direct manager —"}
+              </option>
+              {reportsToOptions.map((u) => (
                 <option key={u.userId} value={u.userId}>
                   {u.fullName}{u.position ? ` · ${u.position}` : ""}
                 </option>
               ))}
             </select>
+            <p className="mt-1 text-[11px] text-slate-500">
+              Head(s) of the selected department{branchId ? " at this branch" : ""}.
+            </p>
           </Field>
 
           <div

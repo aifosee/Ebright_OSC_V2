@@ -15,6 +15,7 @@ import {
   User,
   X,
 } from "lucide-react";
+import { useModalA11y } from "@/app/components/useModalA11y";
 import {
   fetchInductionForManager,
   setInductionDurationDays,
@@ -97,6 +98,10 @@ export default function EmployeeDetailModal({ userId, fallbackName, onClose }: P
   >({ kind: "loading" });
   const [lightboxStepId, setLightboxStepId] = useState<number | null>(null);
 
+  // Trap focus + Escape on the main modal, but stand down while the evidence
+  // lightbox is open so Escape closes the lightbox first.
+  const dialogRef = useModalA11y<HTMLDivElement>(onClose, lightboxStepId === null);
+
   // Reset to the loading state when the target user changes — done during
   // render (React's "adjust state on prop change" pattern) rather than a
   // synchronous setState inside the effect below.
@@ -124,7 +129,9 @@ export default function EmployeeDetailModal({ userId, fallbackName, onClose }: P
       onClick={onClose}
     >
       <div
-        className="flex max-h-[90vh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl"
+        ref={dialogRef}
+        tabIndex={-1}
+        className="flex max-h-[90vh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl focus:outline-none"
         onClick={(e) => e.stopPropagation()}
       >
         <ModalHeader
@@ -607,13 +614,15 @@ function EvidenceLightbox({
   step: InductionStepView | null;
   onClose: () => void;
 }) {
-  if (!step || !step.evidenceFileId) return null;
+  const open = Boolean(step && step.evidenceFileId);
+  const ref = useModalA11y<HTMLDivElement>(onClose, open);
+  if (!open || !step) return null;
   return (
     <div
       className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-900/80 p-6"
       onClick={onClose}
     >
-      <div className="flex max-h-[90vh] w-full max-w-3xl flex-col overflow-hidden rounded-xl bg-white shadow-2xl" onClick={(e) => e.stopPropagation()}>
+      <div ref={ref} tabIndex={-1} className="flex max-h-[90vh] w-full max-w-3xl flex-col overflow-hidden rounded-xl bg-white shadow-2xl focus:outline-none" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between border-b border-slate-200 px-4 py-2">
           <p className="truncate text-sm font-semibold text-slate-700">
             Evidence — {step.title}

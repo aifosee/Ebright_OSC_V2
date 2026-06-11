@@ -1,26 +1,21 @@
 "use client";
 
 /**
- * Modular Induction Training embed panel — per spec Phase A.
+ * Modular Induction Training embed panel.
  *
- * Self-contained card that displays a placeholder for the Induction Training
- * flowchart. Will be wired to Induction_Training___All_Employee_Types.html
- * when that file is available; for now shows a placeholder + "Open Full Flow"
- * link that points where the file is expected to live (currently a 404).
- *
- * // TODO: connect to Induction_Training___All_Employee_Types.html — replace
- * //       the externalUrl prop's default with the real path once the file
- * //       is hosted somewhere accessible.
+ * Links to the interactive 3-day training experience that ships in
+ * /public/onboarding-preview/index.html — the same target as the HRMS
+ * dashboard "Induction Training" tile (keep the two in sync).
  */
 interface Props {
   employeeTypeLabel: string;
-  /** Override the default file path if the flowchart lives elsewhere. */
+  /** Override the default path if the flow is hosted elsewhere. */
   externalUrl?: string;
 }
 
 export function InductionTrainingEmbed({
   employeeTypeLabel,
-  externalUrl = "/Induction_Training___All_Employee_Types.html",
+  externalUrl = "/onboarding-preview/index.html",
 }: Props) {
   return (
     <section className="bg-white border border-slate-200 rounded-2xl overflow-hidden">
@@ -43,11 +38,11 @@ export function InductionTrainingEmbed({
         </a>
       </header>
       <div className="px-6 py-10 bg-slate-50 text-center">
-        <p className="text-3xl mb-2" aria-hidden="true">📊</p>
-        <p className="text-sm font-semibold text-slate-700">Induction Training Flowchart</p>
+        <p className="text-sm font-semibold text-slate-700">Induction Training Flow</p>
         <p className="mt-2 text-xs text-slate-500 max-w-md mx-auto leading-relaxed">
-          Link this panel to <code className="font-mono text-[11px] bg-white px-1 rounded">Induction_Training___All_Employee_Types.html</code>{" "}
-          to embed the full flowchart here.
+          The interactive 3-day induction training experience for{" "}
+          <span className="font-semibold text-slate-700">{employeeTypeLabel}</span>.
+          Use <span className="font-semibold text-slate-700">Open Full Flow</span> above to launch it.
         </p>
       </div>
     </section>

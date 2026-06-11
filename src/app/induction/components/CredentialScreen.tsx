@@ -5,14 +5,23 @@ import { useState } from "react";
 export interface CredentialData {
   candidateName: string;
   candidateEmail: string;
-  username: string;
-  tempPassword: string;
+  /** The induction login link (token URL) the candidate uses to begin. This
+   *  is the real, working entry point — there is no separate password to
+   *  share from this flow. */
   loginLink: string;
 }
 
 /**
- * Step 2 of the Create Induction Profile modal — shows generated credentials
- * with copy buttons for each field. Single Done button closes the modal.
+ * Step 2 of the Create / Accept Induction flow — confirmation screen.
+ *
+ * Shows the candidate's induction login link as the single copyable artifact.
+ * The link is token-authenticated, so it is all the candidate needs to start.
+ *
+ * NOTE: this flow does NOT mint a username/password. The welcome email with
+ * real credentials is scheduled + sent by the Employee form + cron job
+ * (induction_profile.pending_email_password → /api/jobs/send-onboarding-emails).
+ * This screen therefore never claims an email was sent and never shows a
+ * password — it only surfaces the link HR can share directly if needed.
  */
 interface Props {
   data: CredentialData;
@@ -25,10 +34,10 @@ export function CredentialScreen({ data, onDone }: Props) {
       <header className="px-6 py-4 border-b border-slate-200 flex items-start justify-between gap-3">
         <div>
           <h2 className="text-base font-bold text-slate-900 flex items-center gap-2">
-            <span aria-hidden="true">✓</span> Induction profile created
+            <span aria-hidden="true">✓</span> Induction profile ready
           </h2>
           <p className="mt-0.5 text-xs text-slate-500">
-            Share these credentials with the candidate so they can begin onboarding.
+            Share this induction link with the candidate so they can begin onboarding.
           </p>
         </div>
         <button
@@ -42,22 +51,20 @@ export function CredentialScreen({ data, onDone }: Props) {
       </header>
 
       <div className="px-6 py-5 space-y-4 overflow-y-auto flex-1">
-        {/* Green credential card */}
+        {/* Green link card */}
         <div className="rounded-xl border-2 border-emerald-200 bg-emerald-50 p-4 space-y-3">
           <CredRow label="Candidate" value={`${data.candidateName} (${data.candidateEmail})`} copyable={false} />
-          <CredRow label="Username" value={data.username} copyable />
-          <CredRow label="Temporary Password" value={data.tempPassword} copyable mono />
-          <CredRow label="Onboarding Login Link" value={data.loginLink} copyable mono />
+          <CredRow label="Induction Login Link" value={data.loginLink} copyable mono />
         </div>
 
-        {/* Blue info box */}
+        {/* Blue info box — accurate: the link is the entry point, and the
+            welcome email (if scheduled) is sent separately by the cron. */}
         <div className="rounded-md border border-blue-200 bg-blue-50 px-3 py-2.5 text-xs text-blue-800 flex items-start gap-2">
-          <span aria-hidden="true">📧</span>
+          <span aria-hidden="true">🔗</span>
           <span>
-            An email with login details has been queued to send automatically.
-            <span className="block text-[10px] text-blue-700/70 mt-0.5">
-              (Note: real email sending is stubbed for now — credentials are logged to the server console)
-            </span>
+            This link is all the candidate needs to log in and start their induction —
+            no separate password required. If a welcome email was scheduled when the
+            employee was created, it is sent automatically on the scheduled date.
           </span>
         </div>
       </div>

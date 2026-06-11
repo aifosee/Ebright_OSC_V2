@@ -13,8 +13,32 @@ type TxClient = Parameters<Parameters<typeof prisma.$transaction>[0]>[0];
 import bcrypt from "bcryptjs";
 import { STAFF_ROLE_ID } from "@/lib/employeeQueries";
 import { titleCaseName } from "@/lib/text";
-import { WORKFLOW_TEMPLATES, computeStepDueDate, isKnownTemplate } from "@/app/induction/templates";
+import { WORKFLOW_TEMPLATES, computeStepDueDate } from "@/app/induction/templates";
 import { getRequestBaseUrl } from "@/lib/baseUrl";
+
+/**
+ * Pick the induction workflow template for a new hire from their role and
+ * branch. Replaces the old HR-facing template picker now that onboarding is
+ * provisioned automatically. All returned keys exist in WORKFLOW_TEMPLATES.
+ */
+function pickOnboardingTemplate(role: string | null, branchCode: string | null): string {
+  const isHq = branchCode === "HQ";
+  switch (role) {
+    case "PT COACH":
+      return "CoachPartTimer";
+    case "FT COACH":
+      return "CoachFullTimer";
+    case "INTERN":
+      return isHq ? "Standard" : "ProtegeInternBranch";
+    case "FT CEO":
+    case "FT HOD":
+    case "FT EXEC":
+    case "BM":
+      return "FullTimer";
+    default:
+      return "Standard";
+  }
+}
 
 export interface OnboardingCredentials {
   candidateName: string;
@@ -101,9 +125,20 @@ export async function createEmployee(_: CreateEmployeeResult | null, formData: F
   const employmentType = s(formData, "employmentType") || null;
   const startDate = dateOrNull(s(formData, "startDate"));
   const endDate = dateOrNull(s(formData, "endDate"));
-  const statusField = s(formData, "status") || "active";
+  // Onboarding is implicit on creation — Admin never sees or picks status.
+  // Every new employee starts "onboarding" and flips to "active" when their
+  // induction checklist completes (see finalizeOnboardingActivation in
+  // src/app/induction/actions.ts).
+  const statusField = "onboarding";
   const probation = formData.get("probation") === "on";
   const rate = role === "PT COACH" ? (s(formData, "rate") || null) : null;
+
+  // Start/End dates are required on creation, and End must fall after Start.
+  if (!startDate) return { ok: false, error: "Start Date is required." };
+  if (!endDate) return { ok: false, error: "End Date is required." };
+  if (endDate.getTime() <= startDate.getTime()) {
+    return { ok: false, error: "End Date must be after Start Date." };
+  }
 
   const nickName = s(formData, "nickName") || null;
   const phone = s(formData, "phone") || null;
@@ -122,39 +157,26 @@ export async function createEmployee(_: CreateEmployeeResult | null, formData: F
   const emergencyPhone = s(formData, "emergencyPhone") || null;
   const emergencyRelation = s(formData, "emergencyRelation") || null;
 
-  // Optional: "Assign to onboarding" toggle on the Employment tab.
-  // When on, the same transaction also creates an induction_profile
-  // (status=Sent) and seeds its induction_step rows from the chosen
-  // workflow template. Validation happens before the transaction so we
-  // never half-create anything.
-  const assignOnboarding = formData.get("assign_to_onboarding") === "on";
-  const onbTemplate = s(formData, "workflow_template");
-  const onbStartDateRaw = s(formData, "onboarding_start_date");
-  const onbSendEmailOnRaw = s(formData, "send_email_on");
-  const onbBuddyIdRaw = s(formData, "buddy_user_id");
-
-  let onbStartDate: Date | null = null;
-  let onbSendEmailOn: Date | null = null;
-  let onbBuddyUserId: number | null = null;
-  if (assignOnboarding) {
-    if (!isKnownTemplate(onbTemplate)) {
-      return { ok: false, error: "Please pick a workflow template for onboarding." };
-    }
-    onbStartDate = dateOrNull(onbStartDateRaw);
-    if (!onbStartDate) {
-      return { ok: false, error: "Onboarding start date is required when assigning onboarding." };
-    }
-    // Default the send date to the start date if HR didn't pick one.
-    // The cron job sends on send_email_on (or earlier if it catches up).
-    onbSendEmailOn = onbSendEmailOnRaw ? dateOrNull(onbSendEmailOnRaw) : onbStartDate;
-    if (!onbSendEmailOn) {
-      return { ok: false, error: "Email send date is invalid." };
-    }
-    if (onbBuddyIdRaw) {
-      const parsed = Number.parseInt(onbBuddyIdRaw, 10);
-      onbBuddyUserId = Number.isFinite(parsed) ? parsed : null;
-    }
-  }
+  // Onboarding is provisioned automatically for every new employee in the
+  // same transaction below: an induction_profile (status=Sent) plus its
+  // seeded induction_step rows. The workflow template is derived from the
+  // employee's role + branch (HQ vs branch) rather than picked by HR. The
+  // induction starts on the employee's start date; the welcome email is
+  // scheduled for the same day (dispatched by the existing cron). No buddy
+  // is assigned at creation.
+  const branchCode =
+    branchIdValue !== null
+      ? (
+          await prisma.branch.findUnique({
+            where: { branch_id: branchIdValue },
+            select: { branch_code: true },
+          })
+        )?.branch_code ?? null
+      : null;
+  const onbTemplate = pickOnboardingTemplate(role, branchCode);
+  const onbStartDate: Date = startDate;
+  const onbSendEmailOn: Date = startDate;
+  const onbBuddyUserId: number | null = null;
 
   const existing = await prisma.users.findUnique({ where: { email }, select: { user_id: true } });
   if (existing) return { ok: false, error: `Email "${email}" is already registered.` };
@@ -164,18 +186,17 @@ export async function createEmployee(_: CreateEmployeeResult | null, formData: F
     if (dupe) return { ok: false, error: `Employee ID "${employeeId}" is already taken.` };
   }
 
-  // Pre-generate onboarding credential bits (only used when toggle is on).
+  // Pre-generate onboarding credential bits. Every new employee is onboarded,
+  // so these are always used.
   const onbToken = randomBytes(32).toString("hex");
   const onbExpiresAt = expiryFromNow();
   const onbUsername = generateOnboardingUsername(email);
   const onbTempPassword = generateOnboardingTempPassword();
   // Hash outside the transaction (bcrypt is CPU-heavy, no need to hold
-  // the tx open while it runs). Only used when assigning onboarding —
-  // without it, the candidate could never log in with the temp password
-  // we show HR, since the auth credentials provider rejects null passwords.
-  const onbHashedPassword = assignOnboarding
-    ? await bcrypt.hash(onbTempPassword, 10)
-    : null;
+  // the tx open while it runs). Without it, the candidate could never log in
+  // with the temp password we show HR, since the auth credentials provider
+  // rejects null passwords.
+  const onbHashedPassword = await bcrypt.hash(onbTempPassword, 10);
 
   try {
     await prisma.$transaction(async (tx: TxClient) => {
@@ -240,38 +261,36 @@ export async function createEmployee(_: CreateEmployeeResult | null, formData: F
         });
       }
 
-      if (assignOnboarding && onbStartDate) {
-        const templateSteps = WORKFLOW_TEMPLATES[onbTemplate];
-        const profile = await tx.induction_profile.create({
-          data: {
-            user_id: user.user_id,
-            induction_type: "Onboarding",
-            workflow_template: onbTemplate,
-            buddy_user_id: onbBuddyUserId,
-            link_token: onbToken,
-            link_expires_at: onbExpiresAt,
-            status: "Sent",
-            start_date: onbStartDate,
-            send_email_on: onbSendEmailOn,
-            // Plaintext temp password is held here so the cron job can
-            // include it in the welcome email. Cleared as soon as the
-            // email is dispatched (see /api/jobs/send-onboarding-emails).
-            pending_email_password: onbTempPassword,
-            created_by: user.user_id,
-          },
-          select: { id: true },
-        });
-        await tx.induction_step.createMany({
-          data: templateSteps.map((step) => ({
-            induction_profile_id: profile.id,
-            step_number: step.stepNumber,
-            title: step.title,
-            description: step.description,
-            due_date: computeStepDueDate(onbStartDate as Date, step.daysFromStart),
-            status: "Pending",
-          })),
-        });
-      }
+      const templateSteps = WORKFLOW_TEMPLATES[onbTemplate];
+      const profile = await tx.induction_profile.create({
+        data: {
+          user_id: user.user_id,
+          induction_type: "Onboarding",
+          workflow_template: onbTemplate,
+          buddy_user_id: onbBuddyUserId,
+          link_token: onbToken,
+          link_expires_at: onbExpiresAt,
+          status: "Sent",
+          start_date: onbStartDate,
+          send_email_on: onbSendEmailOn,
+          // Plaintext temp password is held here so the cron job can
+          // include it in the welcome email. Cleared as soon as the
+          // email is dispatched (see /api/jobs/send-onboarding-emails).
+          pending_email_password: onbTempPassword,
+          created_by: user.user_id,
+        },
+        select: { id: true },
+      });
+      await tx.induction_step.createMany({
+        data: templateSteps.map((step) => ({
+          induction_profile_id: profile.id,
+          step_number: step.stepNumber,
+          title: step.title,
+          description: step.description,
+          due_date: computeStepDueDate(onbStartDate, step.daysFromStart),
+          status: "Pending",
+        })),
+      });
     });
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Unknown database error.";
@@ -279,33 +298,31 @@ export async function createEmployee(_: CreateEmployeeResult | null, formData: F
   }
 
   revalidatePath("/dashboard-employee-management");
+  revalidatePath("/induction/onboarding-dashboard");
 
-  if (assignOnboarding) {
-    revalidatePath("/induction/onboarding-dashboard");
-    const baseUrl = await getRequestBaseUrl();
-    // Login link points at the standard /login page (not the token route).
-    // Candidates log in with username + temp password; the token URL is
-    // shown to HR as a backup direct-access link.
-    const loginLink = `${baseUrl}/login`;
-    // Real send is delegated to the cron route
-    // (/api/jobs/send-onboarding-emails) which fires daily and dispatches
-    // any induction_profile rows where send_email_on <= today AND
-    // email_sent_at IS NULL. HR sees the credentials in the overlay
-    // straight away so they can copy/paste them out-of-band if needed.
-    return {
-      ok: true,
-      credentials: {
-        candidateName: titleCaseName(fullName),
-        candidateEmail: email,
-        username: onbUsername,
-        tempPassword: onbTempPassword,
-        loginLink,
-        loginToken: onbToken,
-      },
-    };
-  }
-
-  redirect("/dashboard-employee-management");
+  // Every new employee is onboarded, so we always return the generated
+  // credentials for the overlay rather than redirecting away.
+  const baseUrl = await getRequestBaseUrl();
+  // Login link points at the standard /login page (not the token route).
+  // Candidates log in with username + temp password; the token URL is
+  // shown to HR as a backup direct-access link.
+  const loginLink = `${baseUrl}/login`;
+  // Real send is delegated to the cron route
+  // (/api/jobs/send-onboarding-emails) which fires daily and dispatches
+  // any induction_profile rows where send_email_on <= today AND
+  // email_sent_at IS NULL. HR sees the credentials in the overlay
+  // straight away so they can copy/paste them out-of-band if needed.
+  return {
+    ok: true,
+    credentials: {
+      candidateName: titleCaseName(fullName),
+      candidateEmail: email,
+      username: onbUsername,
+      tempPassword: onbTempPassword,
+      loginLink,
+      loginToken: onbToken,
+    },
+  };
 }
 
 export async function updateEmployee(_: CreateEmployeeResult | null, formData: FormData): Promise<CreateEmployeeResult> {

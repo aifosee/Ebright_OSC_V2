@@ -7,16 +7,7 @@ import type { ReactNode } from "react";
 import { Home, ChevronRight, User, Briefcase, Landmark, HeartPulse, CircleAlert } from "lucide-react";
 import type { CreateEmployeeResult } from "@/app/dashboard-employee-management/actions";
 import type { EmployeeDetailFull } from "@/lib/employeeQueries";
-import type { InductionEmployeeOption } from "@/app/induction/queries";
 import { CredentialScreen } from "@/app/induction/components/CredentialScreen";
-
-const WORKFLOW_TEMPLATE_OPTIONS: Array<{ value: string; label: string }> = [
-  { value: "Standard", label: "Regular Intern · HQ" },
-  { value: "ProtegeInternBranch", label: "Protege Intern · Branch" },
-  { value: "CoachPartTimer", label: "Coach (Part-timer) · Branch + 3-week" },
-  { value: "CoachFullTimer", label: "Coach (Full-timer) · Branch + 3-week" },
-  { value: "FullTimer", label: "Full-timer · HQ or Branch" },
-];
 
 const ROLE_OPTIONS = ["FT CEO", "FT HOD", "FT EXEC", "BM", "FT COACH", "PT COACH", "INTERN"];
 
@@ -109,7 +100,6 @@ export default function EmployeeForm({
   employee,
   action,
   isSelfEdit = false,
-  buddyOptions = [],
 }: {
   branches: BranchOpt[];
   departments: DepartmentOpt[];
@@ -117,9 +107,6 @@ export default function EmployeeForm({
   employee?: EmployeeDetailFull;
   action: FormAction;
   isSelfEdit?: boolean;
-  /** Active-user list for the Induction Buddy dropdown. Only used when
-   *  the "Assign to onboarding" toggle is on. Empty on edit pages. */
-  buddyOptions?: InductionEmployeeOption[];
 }) {
   const router = useRouter();
   const [state, formAction, pending] = useActionState<CreateEmployeeResult | null, FormData>(action, null);
@@ -128,22 +115,6 @@ export default function EmployeeForm({
   const [startDate, setStartDate] = useState<string>(employee?.startDate ?? "");
   const [endDate, setEndDate] = useState<string>(employee?.endDate ?? "");
   const [activeTab, setActiveTab] = useState<TabKey>("profile");
-  // Onboarding toggle — only relevant on the Add Employee (create) flow.
-  // When on, the form posts workflow_template / onboarding_start_date /
-  // buddy_user_id and the server creates an induction_profile + steps in
-  // the same transaction, then returns credentials for the overlay.
-  const [assignOnboarding, setAssignOnboarding] = useState(false);
-  const [onbWorkflowTemplate, setOnbWorkflowTemplate] = useState("Standard");
-  const [onbStartDate, setOnbStartDate] = useState(() =>
-    new Date().toISOString().slice(0, 10),
-  );
-  // When HR changes the start date, the email-send date follows along
-  // unless they've manually changed it (tracked by sendEmailDirty).
-  const [onbSendEmailOn, setOnbSendEmailOn] = useState(() =>
-    new Date().toISOString().slice(0, 10),
-  );
-  const [sendEmailDirty, setSendEmailDirty] = useState(false);
-  const [onbBuddyId, setOnbBuddyId] = useState("");
   const [branchId, setBranchId] = useState<string>(
     employee?.branchId ? String(employee.branchId) : "",
   );
@@ -183,6 +154,16 @@ export default function EmployeeForm({
   }
 
   const isEdit = mode === "edit";
+  // Add Employee (HR create) flow. On create, onboarding is implicit:
+  // Start/End dates are required, Status is fixed server-side to
+  // "onboarding", and the server always provisions an induction profile +
+  // credentials (overlay shown on success).
+  const isCreate = !isEdit && !isSelfEdit;
+  // End Date must fall after Start Date. Empty values are handled by the
+  // `required` attribute; this only guards the ordering. ISO date strings
+  // compare correctly lexicographically.
+  const dateRangeInvalid =
+    isCreate && !!startDate && !!endDate && endDate <= startDate;
 
   const headingText = isSelfEdit ? "Edit My Profile" : isEdit ? "Edit Employee" : "Add Employee";
   const headingDesc = isSelfEdit
@@ -194,9 +175,7 @@ export default function EmployeeForm({
     ? "Save Profile"
     : isEdit
       ? "Save Changes"
-      : assignOnboarding
-        ? "Save & Generate Link"
-        : "Save Employee";
+      : "Save & Generate Link";
   const savingText = "Saving...";
 
   // Credential overlay: shown after Save & Generate Link succeeds. Done
@@ -495,12 +474,13 @@ export default function EmployeeForm({
                 />
               </Field>
             )}
-            <Field label="Start Date">
+            <Field label="Start Date" required={isCreate}>
               <input
                 name="startDate"
                 type="date"
                 className={inputCls}
                 value={startDate}
+                required={isCreate}
                 onChange={(e) => {
                   const v = e.target.value;
                   setStartDate(v);
@@ -508,130 +488,51 @@ export default function EmployeeForm({
                 }}
               />
             </Field>
-            <Field label="End Date" hint="Auto-filled for fixed-term contracts — editable to match uni-set dates.">
+            <Field
+              label="End Date"
+              required={isCreate}
+              hint="Auto-filled for fixed-term contracts — editable to match uni-set dates."
+            >
               <input
                 name="endDate"
                 type="date"
                 className={inputCls}
                 value={endDate}
+                required={isCreate}
+                min={isCreate && startDate ? startDate : undefined}
                 onChange={(e) => setEndDate(e.target.value)}
               />
+              {dateRangeInvalid && (
+                <p className="mt-1 text-xs text-red-600">
+                  End Date must be after Start Date.
+                </p>
+              )}
             </Field>
-            <Field label="Status">
-              <div className="relative">
-                <select
-                  name="status"
-                  defaultValue={employee?.status ?? "active"}
-                  className={`${inputCls} pr-8 appearance-none cursor-pointer`}
-                >
-                  {STATUS_OPTIONS.map((o) => (
-                    <option key={o.value} value={o.value}>{o.label}</option>
-                  ))}
-                </select>
-                <ChevronRight className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 rotate-90" aria-hidden="true" />
-              </div>
-            </Field>
+            {/* Status is only editable when managing an existing record. On
+                the Add Employee flow the server fixes status to "onboarding"
+                — Admin does not see or pick it. */}
+            {(isEdit || isSelfEdit) && (
+              <Field label="Status">
+                <div className="relative">
+                  <select
+                    name="status"
+                    defaultValue={employee?.status ?? "active"}
+                    className={`${inputCls} pr-8 appearance-none cursor-pointer`}
+                  >
+                    {STATUS_OPTIONS.map((o) => (
+                      <option key={o.value} value={o.value}>{o.label}</option>
+                    ))}
+                  </select>
+                  <ChevronRight className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 rotate-90" aria-hidden="true" />
+                </div>
+              </Field>
+            )}
             <Field label="Probation">
               <label className="flex items-center gap-2 h-10 px-3 rounded-lg border border-slate-200 bg-white text-sm cursor-pointer hover:bg-slate-50">
                 <input name="probation" type="checkbox" className="w-4 h-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500" defaultChecked={employee?.probation ?? false} />
                 <span className="text-slate-700">Currently on probation</span>
               </label>
             </Field>
-
-            {!isEdit && !isSelfEdit && (
-              <div className="col-span-2 space-y-4">
-                <hr className="border-slate-200" />
-                <div className="flex items-start justify-between gap-4">
-                  <div className="min-w-0">
-                    <p className="text-sm font-semibold text-slate-900">Assign to onboarding</p>
-                    <p className="mt-0.5 text-xs text-slate-500">
-                      Generate login credentials and assign an induction workflow.
-                    </p>
-                  </div>
-                  <label className="relative inline-flex items-center cursor-pointer shrink-0">
-                    <input
-                      type="checkbox"
-                      name="assign_to_onboarding"
-                      checked={assignOnboarding}
-                      onChange={(e) => setAssignOnboarding(e.target.checked)}
-                      className="sr-only peer"
-                    />
-                    <div className="w-11 h-6 bg-slate-200 rounded-full peer peer-checked:bg-blue-600 transition-colors after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-transform peer-checked:after:translate-x-5" />
-                  </label>
-                </div>
-
-                {assignOnboarding && (
-                  <div className="rounded-lg border border-blue-100 bg-blue-50/40 p-4 grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <Field label="Workflow Template" required>
-                      <div className="relative">
-                        <select
-                          name="workflow_template"
-                          value={onbWorkflowTemplate}
-                          onChange={(e) => setOnbWorkflowTemplate(e.target.value)}
-                          required
-                          className={`${inputCls} pr-8 appearance-none cursor-pointer`}
-                        >
-                          {WORKFLOW_TEMPLATE_OPTIONS.map((t) => (
-                            <option key={t.value} value={t.value}>{t.label}</option>
-                          ))}
-                        </select>
-                        <ChevronRight className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 rotate-90" aria-hidden="true" />
-                      </div>
-                    </Field>
-                    <Field label="Onboarding Start Date" required>
-                      <input
-                        name="onboarding_start_date"
-                        type="date"
-                        value={onbStartDate}
-                        onChange={(e) => {
-                          const v = e.target.value;
-                          setOnbStartDate(v);
-                          // Auto-sync the send date if HR hasn't manually
-                          // tweaked it — matches the spec default of
-                          // "same as the onboarding start date".
-                          if (!sendEmailDirty) setOnbSendEmailOn(v);
-                        }}
-                        required
-                        className={inputCls}
-                      />
-                    </Field>
-                    <Field
-                      label="Send onboarding email on"
-                      hint="Defaults to the onboarding start date. Pick an earlier or later date to schedule the welcome email."
-                    >
-                      <input
-                        name="send_email_on"
-                        type="date"
-                        value={onbSendEmailOn}
-                        onChange={(e) => {
-                          setOnbSendEmailOn(e.target.value);
-                          setSendEmailDirty(true);
-                        }}
-                        className={inputCls}
-                      />
-                    </Field>
-                    <Field label="Induction Buddy" span={2}>
-                      <div className="relative">
-                        <select
-                          name="buddy_user_id"
-                          value={onbBuddyId}
-                          onChange={(e) => setOnbBuddyId(e.target.value)}
-                          className={`${inputCls} pr-8 appearance-none cursor-pointer`}
-                        >
-                          <option value="">No buddy assigned</option>
-                          {buddyOptions.map((b) => (
-                            <option key={b.userId} value={b.userId}>
-                              {b.fullName} ({b.email})
-                            </option>
-                          ))}
-                        </select>
-                        <ChevronRight className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 rotate-90" aria-hidden="true" />
-                      </div>
-                    </Field>
-                  </div>
-                )}
-              </div>
-            )}
           </Section>
           </div>
 
@@ -687,7 +588,7 @@ export default function EmployeeForm({
             </button>
             <button
               type="submit"
-              disabled={pending}
+              disabled={pending || dateRangeInvalid}
               className="h-10 px-5 rounded-lg bg-blue-600 text-white text-sm font-semibold hover:bg-blue-700 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 shadow-sm disabled:opacity-60 disabled:cursor-not-allowed"
             >
               {pending ? savingText : saveButtonText}

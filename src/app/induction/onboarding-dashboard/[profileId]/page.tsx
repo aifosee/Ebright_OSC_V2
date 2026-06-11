@@ -7,7 +7,7 @@ import { canManageInductions } from "@/app/induction/roles";
 import { listBranches } from "@/lib/employeeQueries";
 import { listDepartments } from "@/app/induction/queries";
 import { CandidateDetailView } from "./CandidateDetailView";
-import type { PendingInductionRow } from "@/app/induction/queries";
+import type { PendingInductionRow, InductionStepView } from "@/app/induction/queries";
 import {
   getActiveAssignmentForUser,
   listAssignableOnboardingWorkflowsForUser,
@@ -75,7 +75,22 @@ export default async function CandidateDetailPage({ params }: PageProps) {
         },
       },
       buddy: { include: { user_profile: { select: { full_name: true } } } },
-      steps: { select: { title: true, status: true } },
+      steps: {
+        select: {
+          id: true,
+          step_number: true,
+          title: true,
+          description: true,
+          due_date: true,
+          status: true,
+          completed_at: true,
+          evidence_file_id: true,
+          evidence_uploaded_at: true,
+          responsible_person: {
+            select: { email: true, user_profile: { select: { full_name: true } } },
+          },
+        },
+      },
     },
   });
   if (!dbProfile) notFound();
@@ -103,11 +118,23 @@ export default async function CandidateDetailPage({ params }: PageProps) {
     isArchived: false, // not relevant on this page
   };
 
-  // Set of completed step titles — used to reconcile spec tasks with DB state.
-  // Matches by title; if titles diverge, spec task shows as unchecked.
-  const completedStepTitles = new Set(
-    dbProfile.steps.filter((s) => s.status === "Completed").map((s) => s.title),
-  );
+  // Real induction steps (single source of truth). The detail view buckets
+  // these by phase and renders actual completion — no spec-title matching.
+  const steps: InductionStepView[] = [...dbProfile.steps]
+    .sort((a, b) => a.step_number - b.step_number)
+    .map((s) => ({
+      id: s.id,
+      stepNumber: s.step_number,
+      title: s.title,
+      description: s.description,
+      responsibleName: s.responsible_person?.user_profile?.full_name ?? null,
+      responsibleEmail: s.responsible_person?.email ?? null,
+      dueDate: s.due_date.toISOString(),
+      status: s.status as InductionStepView["status"],
+      completedAt: s.completed_at?.toISOString() ?? null,
+      evidenceFileId: s.evidence_file_id,
+      evidenceUploadedAt: s.evidence_uploaded_at?.toISOString() ?? null,
+    }));
 
   // For the Assign Role modal dropdowns
   // Plus: any active workflow assignment for this candidate, and the
@@ -130,7 +157,7 @@ export default async function CandidateDetailPage({ params }: PageProps) {
     <AppShell email={userEmail} role={userRole} name={userName}>
       <CandidateDetailView
         profile={profile}
-        completedStepTitles={completedStepTitles}
+        steps={steps}
         branches={branches}
         departments={departments}
         activeUsers={activeUsers}

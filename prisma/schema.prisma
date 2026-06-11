@@ -96,6 +96,9 @@ model employment {
   employee_id     String?     @unique @db.VarChar(50)
   branch_id       Int?
   department_id   Int?
+  // The manager / HOD this employee reports to (nullable). Set by the Assign
+  // Role flow. FK uses SetNull so removing a manager never cascades.
+  reports_to_user_id Int?
   position        String?     @db.VarChar(100)
   start_date      DateTime?   @db.Date
   end_date        DateTime?   @db.Date
@@ -110,7 +113,10 @@ model employment {
   working_hours   String?     @db.VarChar(50)
   branch          branch?     @relation(fields: [branch_id], references: [branch_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_employment_branch")
   department      department? @relation(fields: [department_id], references: [department_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_employment_department")
-  users           users       @relation(fields: [user_id], references: [user_id], onDelete: Cascade, onUpdate: NoAction, map: "fk_employment_user")
+  users           users       @relation("employmentUser", fields: [user_id], references: [user_id], onDelete: Cascade, onUpdate: NoAction, map: "fk_employment_user")
+  reports_to      users?      @relation("employmentReportsTo", fields: [reports_to_user_id], references: [user_id], onDelete: SetNull, onUpdate: NoAction, map: "fk_employment_reports_to")
+
+  @@index([reports_to_user_id], map: "idx_employment_reports_to")
 }
 
 model leave_request {
@@ -176,7 +182,8 @@ model users {
   bank_details                                   bank_details?
   claim                                          claim[]
   emergency_contact                              emergency_contact[]
-  employment                                     employment[]
+  employment                                     employment[]                 @relation("employmentUser")
+  employment_direct_reports                      employment[]                 @relation("employmentReportsTo")
   leave_request_leave_request_approved_byTousers leave_request[]              @relation("leave_request_approved_byTousers")
   leave_request_leave_request_user_idTousers     leave_request[]              @relation("leave_request_user_idTousers")
   user_profile                                   user_profile?
@@ -726,4 +733,29 @@ model workflow_assignment_step {
   @@unique([workflow_assignment_id, workflow_step_id], map: "uq_workflow_assignment_step_unique")
   @@index([workflow_assignment_id], map: "idx_workflow_assignment_step_assignment")
   @@index([workflow_step_id], map: "idx_workflow_assignment_step_step")
+}
+
+// ============================================================
+// NOTIFICATION — added 2026-06-11 for the onboarding → active flow.
+//
+// One row per recipient per event. Currently written only when an
+// onboarding induction completes (see finalizeOnboardingActivation in
+// src/app/induction/actions.ts), addressed to every superadmin so they can
+// grant the new employee system access. No UI consumes this table yet — the
+// Superadmin notification surface is a later sprint.
+//
+// recipient_user_id is a plain scalar (no Prisma relation) to avoid adding a
+// back-relation to the large `users` model; the FK is enforced at the DB
+// level by prisma/manual/2026-06-11_add_notification_table.sql.
+// ============================================================
+model notification {
+  id                Int      @id @default(autoincrement())
+  recipient_user_id Int
+  type              String   @db.VarChar(50)
+  message           String
+  link              String?  @db.VarChar(500)
+  is_read           Boolean  @default(false)
+  created_at        DateTime @default(now()) @db.Timestamptz(6)
+
+  @@index([recipient_user_id], map: "idx_notification_recipient")
 }

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useTransition } from "react";
+import { useModalA11y } from "@/app/components/useModalA11y";
 import { createInduction } from "@/app/induction/actions";
 import type { InductionEmployeeOption } from "@/app/induction/queries";
 import { CredentialScreen, type CredentialData } from "./CredentialScreen";
@@ -49,21 +50,15 @@ const WORKFLOW_TEMPLATES: Array<{ value: string; label: string }> = [
   { value: "FullTimer", label: "Full-timer · HQ or Branch" },
 ];
 
-function generateUsername(email: string): string {
-  return email.split("@")[0]?.toLowerCase().replace(/[^a-z0-9]/g, "") ?? "";
-}
-
-function generateTempPassword(): string {
-  return "eBright@" + String(Math.floor(1000 + Math.random() * 9000));
-}
-
 export function CreateInductionProfileModal({
   state,
   onClose,
   employees,
   onCreated,
 }: Props) {
-  if (state.mode === "closed") return null;
+  const isOpen = state.mode !== "closed";
+  const dialogRef = useModalA11y<HTMLDivElement>(onClose, isOpen);
+  if (!isOpen) return null;
 
   return (
     <div
@@ -75,7 +70,9 @@ export function CreateInductionProfileModal({
       onClick={onClose}
     >
       <div
-        className="bg-white rounded-xl shadow-2xl w-full max-w-lg max-h-[90vh] flex flex-col overflow-hidden"
+        ref={dialogRef}
+        tabIndex={-1}
+        className="bg-white rounded-xl shadow-2xl w-full max-w-lg max-h-[90vh] flex flex-col overflow-hidden focus:outline-none"
         onClick={(e) => e.stopPropagation()}
       >
         {state.mode === "form" ? (
@@ -152,20 +149,16 @@ function FormView({
         return;
       }
 
-      // Build the credential screen data
-      const username = generateUsername(employeeEmail);
-      const tempPassword = generateTempPassword();
+      // Build the confirmation screen data. The token login link is the
+      // candidate's real entry point — this flow does not mint a password
+      // (the welcome email + real credentials are handled by the Employee
+      // form + cron job, see CredentialScreen note).
       const baseUrl = typeof window !== "undefined" ? window.location.origin : "";
       const loginLink = `${baseUrl}/induction/${result.token ?? ""}`;
-
-      // TODO: wire up real email send (Resend). Credentials are shown
-      // on-screen via the credential screen only — never logged.
 
       setCredentials({
         candidateName: employeeName.trim(),
         candidateEmail: employeeEmail.trim(),
-        username,
-        tempPassword,
         loginLink,
       });
       onCreated?.();

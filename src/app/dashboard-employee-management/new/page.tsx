@@ -4,17 +4,15 @@ import { authOptions } from "@/lib/nextauth";
 import AppShell from "@/app/components/AppShell";
 import EmployeeForm from "@/app/components/EmployeeForm";
 import { listBranches, listDepartments } from "@/lib/employeeQueries";
-import { listInductionEligibleEmployees } from "@/app/induction/queries";
 import { createEmployee } from "@/app/dashboard-employee-management/actions";
 
 export default async function AddEmployeePage() {
   const session = await getServerSession(authOptions);
   if (!session) redirect("/login");
 
-  const [branches, departments, buddyOptions] = await Promise.all([
+  const [branches, departments] = await Promise.all([
     listBranches(),
     listDepartments(),
-    listInductionEligibleEmployees(),
   ]);
 
   const userEmail = session.user?.email ?? "";
@@ -28,7 +26,6 @@ export default async function AddEmployeePage() {
         departments={departments}
         mode="create"
         action={createEmployee}
-        buddyOptions={buddyOptions}
       />
     </AppShell>
   );

@@ -6,8 +6,10 @@ import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import {
   AlertCircle,
+  Building2,
   CheckCircle2,
   ChevronRight,
+  ClipboardList,
   Home,
   RefreshCw,
   UserMinus,
@@ -30,7 +32,7 @@ import type {
   SubstepTemplateView,
 } from "@/app/induction/queries";
 import type { BranchOpt } from "@/lib/employeeQueries";
-import { AssignRoleModal, type ActiveUserOption } from "./AssignRoleModal";
+import { type ActiveUserOption } from "./AssignRoleModal";
 import {
   CreateInductionProfileModal,
   type ModalState as CreateModalState,
@@ -162,19 +164,6 @@ function computeOnboardingStats(profiles: PendingInductionRow[]): OnboardingStat
   return { total, completed, inProgress, notStarted };
 }
 
-function countProfilesByTemplate(
-  profiles: PendingInductionRow[],
-  templateKey: string,
-): { total: number; completed: number } {
-  let total = 0, completed = 0;
-  for (const p of profiles) {
-    if (p.workflowTemplate !== templateKey) continue;
-    total += 1;
-    if (p.status === "Completed") completed += 1;
-  }
-  return { total, completed };
-}
-
 function formatDateShort(iso: string | null): string {
   if (!iso) return "—";
   const d = new Date(iso);
@@ -199,8 +188,20 @@ function formatRelativeTime(iso: string): string {
 function statusBadgeClasses(status: string): string {
   if (status === "Completed") return "bg-emerald-50 text-emerald-700 border-emerald-200";
   if (status === "In Progress") return "bg-blue-50 text-blue-700 border-blue-200";
-  if (status === "Sent") return "bg-amber-50 text-amber-700 border-amber-200";
+  if (status === "Sent" || status === "Created") return "bg-amber-50 text-amber-700 border-amber-200";
   return "bg-slate-50 text-slate-600 border-slate-200";
+}
+
+// Single source of truth for the human-readable status vocabulary used across
+// the stat cards, the status filter dropdown, AND the table badges:
+//   Sent / Created → "Pre-Onboarding"
+//   In Progress    → "In Progress"
+//   Completed      → "Post-Onboarding"
+function statusLabel(status: string): string {
+  if (status === "Completed") return "Post-Onboarding";
+  if (status === "In Progress") return "In Progress";
+  if (status === "Sent" || status === "Created") return "Pre-Onboarding";
+  return status;
 }
 
 function categoryLabelForTemplate(templateKey: string): string {
@@ -244,20 +245,19 @@ export default function OnboardingDashboard({
   departments,
   onboardingProfiles,
   pendingRequests,
-  branches,
   branchByUserId,
   departmentByUserId,
-  activeUsers,
   eligibleEmployees,
 }: OnboardingDashboardProps) {
   const router = useRouter();
   const [, startTransition] = useTransition();
+  // Dedicated transition for the Refresh button so its spinner reflects the
+  // actual RSC round-trip completing — not a cosmetic timer.
+  const [isRefreshing, startRefreshTransition] = useTransition();
   const [pending, setPending] = useState<Set<string>>(new Set());
   const [errors, setErrors] = useState<Map<string, string>>(new Map());
-  const [refreshing, setRefreshing] = useState(false);
 
-  // Phase 2B state — category filter + search for the candidates table.
-  const [categoryFilter, setCategoryFilter] = useState<string | null>(null);
+  // Phase 2B state — search for the candidates table.
   const [searchQuery, setSearchQuery] = useState("");
   // A5 — candidate-list filter bar (mirrors the Employee Dashboard): branch
   // + induction-status filters that stack with the category/search filters.
@@ -265,8 +265,6 @@ export default function OnboardingDashboard({
   const [statusFilter, setStatusFilter] = useState("");
   const [requestActionPending, setRequestActionPending] = useState<Set<number>>(new Set());
   const [requestActionErrors, setRequestActionErrors] = useState<Map<number, string>>(new Map());
-  // Phase 2B+ state — Assign Role modal target.
-  const [assigningProfile, setAssigningProfile] = useState<PendingInductionRow | null>(null);
   // Phase B state — Create Induction Profile modal.
   const [createModalState, setCreateModalState] = useState<CreateModalState>({ mode: "closed" });
 
@@ -294,7 +292,6 @@ export default function OnboardingDashboard({
   ).sort((a, b) => a.localeCompare(b));
 
   const filteredProfiles = profilesForStats.filter((p) => {
-    if (categoryFilter && p.workflowTemplate !== categoryFilter) return false;
     if (branchFilter && (branchByUserId?.[p.userId] ?? "") !== branchFilter) return false;
     if (statusFilter) {
       // "Not Started" maps to the Sent/Created statuses (mirrors the stat box).
@@ -313,13 +310,12 @@ export default function OnboardingDashboard({
   });
 
   const hasCandidateFilters = Boolean(
-    searchQuery || branchFilter || statusFilter || categoryFilter,
+    searchQuery || branchFilter || statusFilter,
   );
   const clearCandidateFilters = () => {
     setSearchQuery("");
     setBranchFilter("");
     setStatusFilter("");
-    setCategoryFilter(null);
   };
 
   const handleAcceptRequest = (requestId: number) => {
@@ -343,11 +339,11 @@ export default function OnboardingDashboard({
         );
         return;
       }
-      // Phase B: show the credential screen with the generated link
+      // Show the confirmation screen with the induction login link. This is
+      // the candidate's real entry point — no password is minted here (the
+      // welcome email + real credentials are handled by the Employee form +
+      // cron job; see CredentialScreen note).
       if (result.trainingLink && matchingRequest) {
-        const username =
-          matchingRequest.email.split("@")[0]?.toLowerCase().replace(/[^a-z0-9]/g, "") ?? "";
-        const tempPassword = "eBright@" + String(Math.floor(1000 + Math.random() * 9000));
         // Source of truth: rebuild from the actual browser origin so the
         // link is reachable even if NEXTAUTH_URL or proxy headers point
         // at an internal IP. Falls back to the server-built trainingLink
@@ -356,15 +352,11 @@ export default function OnboardingDashboard({
           result.token
             ? `${window.location.origin}/induction/${result.token}`
             : result.trainingLink;
-        // TODO: wire up real email send (Resend). Credentials are shown
-        // on-screen via the credential modal only — never logged.
         setCreateModalState({
           mode: "credential",
           data: {
             candidateName: matchingRequest.fullName,
             candidateEmail: matchingRequest.email,
-            username,
-            tempPassword,
             loginLink,
           },
         });
@@ -446,10 +438,8 @@ export default function OnboardingDashboard({
   };
 
   const handleRefresh = () => {
-    setRefreshing(true);
-    startTransition(() => {
+    startRefreshTransition(() => {
       router.refresh();
-      setTimeout(() => setRefreshing(false), 600);
     });
   };
 
@@ -476,10 +466,10 @@ export default function OnboardingDashboard({
             <button
               type="button"
               onClick={handleRefresh}
-              disabled={refreshing}
+              disabled={isRefreshing}
               className="inline-flex items-center gap-1.5 rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 disabled:opacity-60"
             >
-              <RefreshCw className={`w-3.5 h-3.5 ${refreshing ? "animate-spin" : ""}`} aria-hidden="true" />
+              <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? "animate-spin" : ""}`} aria-hidden="true" />
               Refresh
             </button>
             {/* "+ New Candidate" button removed — Create Induction Profile
@@ -527,76 +517,11 @@ export default function OnboardingDashboard({
               />
             </div>
 
-            {/* ── Completion Alert Strip ── */}
-            {stats.completed > 0 && (
-              <div
-                className="mb-6 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 flex flex-wrap items-center justify-between gap-3"
-                role="status"
-              >
-                <p className="text-sm text-emerald-900 flex items-center gap-2">
-                  <span aria-hidden="true">🎉</span>
-                  <span>
-                    <strong className="font-semibold">{stats.completed} candidate{stats.completed === 1 ? "" : "s"}</strong>{" "}
-                    completed induction and {stats.completed === 1 ? "is" : "are"} ready for role assignment.
-                  </span>
-                </p>
-                <a
-                  href="#candidates-table"
-                  className="rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-700"
-                >
-                  Review →
-                </a>
-              </div>
-            )}
-
-            {/* ── Employee Categories Filter ── */}
-            <section aria-labelledby="cat-heading" className="bg-white border border-slate-200 rounded-2xl mb-6">
-              <header className="flex items-center justify-between gap-3 px-5 py-4 border-b border-slate-200">
-                <div>
-                  <h2 id="cat-heading" className="text-sm font-semibold text-slate-900">⊞ Employee Categories</h2>
-                  <p className="mt-0.5 text-xs text-slate-500">Click a category to filter the candidate list below.</p>
-                </div>
-                {categoryFilter && (
-                  <button
-                    type="button"
-                    onClick={() => setCategoryFilter(null)}
-                    className="text-xs font-semibold text-slate-600 hover:text-slate-900 underline underline-offset-2"
-                  >
-                    ✕ Clear filter
-                  </button>
-                )}
-              </header>
-              <div className="flex flex-wrap gap-2 p-4">
-                {CATEGORIES.map((cat) => {
-                  const counts = countProfilesByTemplate(profilesForStats, cat.key);
-                  const active = categoryFilter === cat.key;
-                  return (
-                    <button
-                      key={cat.key}
-                      type="button"
-                      onClick={() => setCategoryFilter(active ? null : cat.key)}
-                      aria-pressed={active}
-                      className={`inline-flex items-center gap-2 rounded-full border-2 px-3 py-1 text-xs transition ${
-                        active
-                          ? `${cat.borderClass} ${cat.bgClass} shadow-sm`
-                          : "border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50"
-                      }`}
-                    >
-                      <span className={`font-semibold ${active ? cat.textClass : "text-slate-900"}`}>{cat.label}</span>
-                      <span className="text-slate-500">
-                        {counts.total} total · <span className="font-semibold text-emerald-700">{counts.completed} done</span>
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
-            </section>
-
             {/* ── Pending Induction Requests ── */}
             <section aria-labelledby="pending-heading" className="bg-white border border-slate-200 rounded-2xl mb-6">
               <header className="px-5 py-4 border-b border-slate-200">
                 <h2 id="pending-heading" className="text-sm font-semibold text-slate-900 flex items-center gap-2">
-                  <span aria-hidden="true">📋</span> Pending Induction Requests
+                  <ClipboardList className="w-4 h-4 text-slate-500" aria-hidden="true" /> Pending Induction Requests
                   <span className="inline-flex items-center justify-center min-w-[20px] h-5 rounded-full bg-blue-600 text-white text-[11px] font-semibold px-1.5">
                     {requestsForCard.length}
                   </span>
@@ -673,8 +598,8 @@ export default function OnboardingDashboard({
                   )}
                 </div>
                 {/* A5 — filter bar mirroring the Employee Dashboard: search +
-                    branch + role/type + status. Stacks with the Employee
-                    Categories cards (both drive the same category filter). */}
+                    branch + status. (The Employee Categories "Type" filter was
+                    removed — this is a progress view only.) */}
                 <div className="flex flex-wrap items-center gap-2">
                   <div className="relative flex-1 min-w-[220px]">
                     <input
@@ -695,19 +620,6 @@ export default function OnboardingDashboard({
                       <option value="">All Branches</option>
                       {branchOptions.map((b) => (
                         <option key={b} value={b}>{b}</option>
-                      ))}
-                    </select>
-                  </label>
-                  <label className="relative">
-                    <span className="sr-only">Role</span>
-                    <select
-                      value={categoryFilter ?? ""}
-                      onChange={(e) => setCategoryFilter(e.target.value || null)}
-                      className="h-9 rounded-md border border-slate-300 bg-white px-3 text-xs font-medium text-slate-700 focus:border-blue-500 focus:outline-none cursor-pointer min-w-[140px]"
-                    >
-                      <option value="">All Roles</option>
-                      {CATEGORIES.map((c) => (
-                        <option key={c.key} value={c.key}>{c.label}</option>
                       ))}
                     </select>
                   </label>
@@ -744,14 +656,12 @@ export default function OnboardingDashboard({
                         <th scope="col" className="px-3 py-2.5 text-[11px] font-semibold text-slate-500 uppercase tracking-wider">Start</th>
                         <th scope="col" className="px-3 py-2.5 text-[11px] font-semibold text-slate-500 uppercase tracking-wider">Progress</th>
                         <th scope="col" className="px-3 py-2.5 text-[11px] font-semibold text-slate-500 uppercase tracking-wider">Status</th>
-                        <th scope="col" className="px-3 py-2.5 text-[11px] font-semibold text-slate-500 uppercase tracking-wider sr-only">Action</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-200">
                       {filteredProfiles.map((p) => {
                         const pct = p.totalSteps > 0 ? Math.round((p.completedSteps / p.totalSteps) * 100) : 0;
                         const branchName = branchByUserId?.[p.userId] ?? "—";
-                        const isCompleted = p.status === "Completed";
                         return (
                           <tr key={p.id} className="hover:bg-slate-50">
                             <td className="px-5 py-3">
@@ -777,27 +687,8 @@ export default function OnboardingDashboard({
                             </td>
                             <td className="px-3 py-3">
                               <span className={`inline-flex items-center rounded-md border px-2 py-0.5 text-[11px] font-medium ${statusBadgeClasses(p.status)}`}>
-                                {p.status}
+                                {statusLabel(p.status)}
                               </span>
-                            </td>
-                            <td className="px-3 py-3 text-right whitespace-nowrap">
-                              {isCompleted ? (
-                                <button
-                                  type="button"
-                                  onClick={() => setAssigningProfile(p)}
-                                  className="inline-flex items-center rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-700"
-                                >
-                                  Assign Role →
-                                </button>
-                              ) : (
-                                <Link
-                                  href={`/induction/onboarding-dashboard/${p.id}`}
-                                  className="inline-flex items-center text-xs font-semibold text-blue-600 hover:text-blue-700"
-                                  title="Open candidate detail view"
-                                >
-                                  View →
-                                </Link>
-                              )}
                             </td>
                           </tr>
                         );
@@ -808,21 +699,6 @@ export default function OnboardingDashboard({
               )}
             </section>
           </>
-        )}
-
-        {/* ── Assign Role Modal (Phase 2B+) ── */}
-        {showHRLayout && assigningProfile && branches && activeUsers && (
-          <AssignRoleModal
-            profile={assigningProfile}
-            branches={branches}
-            departments={departments}
-            activeUsers={activeUsers}
-            onClose={() => setAssigningProfile(null)}
-            onSuccess={() => {
-              setAssigningProfile(null);
-              router.refresh();
-            }}
-          />
         )}
 
         {/* ── Create Induction Profile Modal (Phase B) ── */}
@@ -1203,9 +1079,9 @@ function InteractiveWorkflowSection({
               <div>
                 <label
                   htmlFor="dept-switcher"
-                  className="mb-1 block text-[10px] font-semibold uppercase tracking-wider text-slate-500"
+                  className="mb-1 flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wider text-slate-500"
                 >
-                  🏢 Department Training is for…
+                  <Building2 className="w-3 h-3" aria-hidden="true" /> Department Training is for…
                 </label>
                 <select
                   id="dept-switcher"

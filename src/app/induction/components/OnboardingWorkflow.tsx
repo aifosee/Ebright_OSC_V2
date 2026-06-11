@@ -16,11 +16,13 @@ import {
   Laptop,
   Lock,
   Mail,
+  MousePointerClick,
   Paperclip,
   Sparkles,
   Upload,
   X,
 } from "lucide-react";
+import { useModalA11y } from "@/app/components/useModalA11y";
 import {
   addSubstepTemplate,
   deleteSubstepTemplate,
@@ -886,7 +888,7 @@ function StepCard({
               <div
                 className={`mx-auto inline-flex items-center gap-1.5 rounded-full bg-gradient-to-r ${phase.accent} px-3 py-1 text-[10px] font-bold text-white shadow-sm`}
               >
-                <span>👆</span>
+                <MousePointerClick className="h-3 w-3" aria-hidden="true" />
                 <span>Click card to build sub-workflow</span>
               </div>
             ) : null
@@ -899,7 +901,8 @@ function StepCard({
                 <span
                   className={`inline-flex items-center gap-1.5 rounded-full bg-gradient-to-r ${phase.accent} px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-white shadow-sm`}
                 >
-                  ✨ Auto-generated · {substeps.length} step
+                  <Sparkles className="h-3 w-3" aria-hidden="true" />
+                  Auto-generated · {substeps.length} step
                   {substeps.length === 1 ? "" : "s"}
                 </span>
                 {canManageSubsteps && templateKey && (
@@ -1008,7 +1011,9 @@ function ManageSubstepsModal({
   const [evidenceType, setEvidenceType] = useState<SubstepEvidence>("photo");
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null);
   const titleInputRef = useRef<HTMLInputElement | null>(null);
+  const dialogRef = useModalA11y<HTMLDivElement>(onClose);
 
   function handleAdd(e: React.FormEvent) {
     e.preventDefault();
@@ -1044,11 +1049,11 @@ function ManageSubstepsModal({
   }
 
   function handleDelete(id: number) {
-    if (!confirm("Delete this step?")) return;
     setPending(true);
     startTransition(async () => {
       const res = await deleteSubstepTemplate(id);
       setPending(false);
+      setConfirmDeleteId(null);
       if (!res.ok) setError(res.error ?? "Could not delete.");
     });
   }
@@ -1059,7 +1064,9 @@ function ManageSubstepsModal({
       onClick={onClose}
     >
       <div
-        className="flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl"
+        ref={dialogRef}
+        tabIndex={-1}
+        className="flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl focus:outline-none"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="bg-gradient-to-r from-slate-900 to-slate-700 px-6 py-5 text-white">
@@ -1123,15 +1130,36 @@ function ManageSubstepsModal({
                           </p>
                         )}
                       </div>
-                      <button
-                        type="button"
-                        onClick={() => handleDelete(sub.id)}
-                        disabled={pending}
-                        className="shrink-0 rounded-md px-2 py-1 text-xs font-medium text-red-600 transition hover:bg-red-50 disabled:opacity-50"
-                        title="Delete this step"
-                      >
-                        Delete
-                      </button>
+                      {confirmDeleteId === sub.id ? (
+                        <div className="flex shrink-0 items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() => handleDelete(sub.id)}
+                            disabled={pending}
+                            className="rounded-md bg-red-600 px-2 py-1 text-xs font-semibold text-white transition hover:bg-red-700 disabled:opacity-50"
+                          >
+                            {pending ? "Deleting…" : "Confirm"}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setConfirmDeleteId(null)}
+                            disabled={pending}
+                            className="rounded-md px-2 py-1 text-xs font-medium text-slate-500 transition hover:bg-slate-100 disabled:opacity-50"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => setConfirmDeleteId(sub.id)}
+                          disabled={pending}
+                          className="shrink-0 rounded-md px-2 py-1 text-xs font-medium text-red-600 transition hover:bg-red-50 disabled:opacity-50"
+                          title="Delete this step"
+                        >
+                          Delete
+                        </button>
+                      )}
                     </li>
                   );
                 })}
@@ -1281,6 +1309,7 @@ function StepDetailModal({
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [file, setFile] = useState<File | null>(null);
   const [localError, setLocalError] = useState<string | null>(null);
+  const dialogRef = useModalA11y<HTMLDivElement>(onClose);
 
   // Object URL for the local file preview, derived from the selected file.
   // The effect only revokes it on change/unmount — no setState in the effect.
@@ -1328,7 +1357,9 @@ function StepDetailModal({
       onClick={onClose}
     >
       <div
-        className="w-full max-w-lg overflow-hidden rounded-2xl bg-white shadow-xl"
+        ref={dialogRef}
+        tabIndex={-1}
+        className="w-full max-w-lg overflow-hidden rounded-2xl bg-white shadow-xl focus:outline-none"
         onClick={(e) => e.stopPropagation()}
       >
         <div className={`bg-gradient-to-r ${phase.accent} px-6 py-5 text-white`}>
